@@ -60,6 +60,172 @@ PRINTABLE_BYTES = bytearray(string.printable,"UTF8")
         Log message - Something like "Initializing Command: SwerveDrive... "
 '''
 
+MAX_INT64 = 2**63 - 1
+
+class DSEventParser():
+    def __init__(self, input_file):
+        self.strm = open(input_file, 'rb')
+        self.version = None
+        self.start_time = None
+
+        #TODO Read on demand rather than pre-loading entire contents of the file
+        self.contents = self.strm.read()
+        self.x = 0
+        self.filelength = len(self.contents)
+
+        self.read_header()
+        return
+
+    def close(self):
+        self.strm.close()
+        return
+
+    def read_timestamp(self):
+        ''' The following is the original code:
+        # Time stamp: int64, uint64
+        b1 = self.strm.read(8)
+        b2 = self.strm.read(8)
+        if not b1 or not b2:
+            return None
+        sec = struct.unpack('>q', b1)[0]
+        millisec = struct.unpack('>Q', b2)[0]
+
+        # for now, ignore
+        dt = datetime.datetime(1904, 1, 1, 0, 0, 0, tzinfo=datetime.timezone.utc)
+        dt += datetime.timedelta(seconds=(sec + float(millisec) / MAX_INT64))
+        return dt
+        '''
+
+        #TODO Make sure date/time is correct
+        # For now, just skip over the timestamp and give half-hearted attempt
+        sec = self.unpack_number("seconds")
+        if not sec:
+            return None
+
+        millisec = self.unpack_number("milliseconds")
+        if not millisec:
+            return None
+
+        dt = datetime.datetime(1904, 1, 1, 0, 0, 0, tzinfo=datetime.timezone.utc)
+        dt += datetime.timedelta(seconds=(sec + float(millisec) / MAX_INT64))
+        return dt
+
+    def unpack_bytes(self, nbytes):
+        ''' Unpack bytes into a numeric value
+        '''
+
+        #TODO Handle signed & unsigned numbers
+
+        # Check to see if we are at the end of the file
+        if self.x >= self.filelength:
+            return None
+
+        value = 0
+
+        for i in range(0,nbytes):
+            byte = self.contents[self.x]
+            byte_value = byte * 256**(nbytes-i-1)
+            value += byte_value
+            #print(f"{hex(self.x)}: {byte} = {byte)} - which contributes a value of {byte_value}")
+            self.x += 1
+
+        return value
+
+    def unpack_number(self, type):
+        ''' Unpack a string of bytes into a number
+            Type is ["int", "seconds", "milliseconds"]
+            Note: the original version used the struct libary but this is commented out
+                  (for now) in order to avoid any PYPI dependencies
+        '''
+
+        if type == "int":
+            # value = struct.unpack('>i', self.strm.read(4))[0]
+            value = self.unpack_bytes(4)
+
+        elif type == "seconds":
+            # int64
+            #b1 = self.strm.read(8)
+            #if not b1:
+            #    return None
+            #sec = struct.unpack('>q', b1)[0]
+            value = self.unpack_bytes(8)
+
+        elif type == "milliseconds":
+            # uint64
+            #b2 = self.strm.read(8)
+            #if not b2:
+            #    return None
+            #millisec = struct.unpack('>Q', b2)[0]
+            value = self.unpack_bytes(8)
+
+        else:
+            raise Exception(f"Unknown unpacking type: {type}")
+
+        return value
+
+    def unpack_string(self, str_length):
+        ''' Unpack a sequence of bytes into a string
+            Note: the original version used the struct libary but this is commented out
+                  (for now) in order to avoid any PYPI dependencies
+        '''
+
+        #msg = struct.unpack('%ds' % msg_len, self.strm.read(str_length))[0]
+        #msg = str.decode('ascii', "backslashreplace")
+
+        msg = str(self.contents[self.x: self.x + str_length], "UTF8")
+
+        self.x += str_length
+
+        return msg
+
+    def read_records(self):
+        if self.version not in [3, 4]:
+            raise Exception("Unknown file version number {}".format(self.version))
+
+        while True:
+            r = self.read_record_v3_or_v4()
+            if r is None:
+                break
+            yield r
+        return
+
+    def read_header(self):
+        #self.version = struct.unpack('>i', self.strm.read(4))[0]
+        self.version = self.unpack_number("int")
+        if self.version not in [3, 4]:
+            raise Exception("Unknown file version number {}".format(self.version))
+        self.start_time = self.read_timestamp()  # file starttime
+        return
+
+    def read_record_v3_or_v4(self):
+        t = self.read_timestamp()
+        if t is None:
+            return None
+
+        #print(f"Reading record length at {hex(self.x)}")
+
+        #msg_len = struct.unpack('>i', self.strm.read(4))[0]
+        msg_len = self.unpack_number("int")
+
+        #msg = struct.unpack('%ds' % msg_len, self.strm.read(msg_len))[0]
+        #msg = msg.decode('ascii', "backslashreplace")
+        msg = self.unpack_string(msg_len)
+
+        return {'time': t, 'message': msg}
+
+    @staticmethod
+    def find_match_info(filename):
+        rdr = DSEventParser(filename)
+        try:
+            for rec in rdr.read_records():
+                m = re.match(r'FMS Connected:\s+(?P<match>.*),\s+Field Time:\s+(?P<time>[0-9/ :]*)', rec['message'])
+                if m:
+                    return {'match_name': m.group('match'),
+                            'field_time': datetime.datetime.strptime(m.group('time'), '%y/%m/%d %H:%M:%S')}
+        finally:
+            rdr.close()
+        return None
+
 FMSCONNECTED_ELEMENT_STR = "FMS Connected:"
 FMSCONNECTED_ELEMENT_BYTE_SEQUENCE = FMSCONNECTED_ELEMENT_STR.encode("utf8")
 FMSCONNECTED_ELEMENT_LEN = len(FMSCONNECTED_ELEMENT_BYTE_SEQUENCE)
@@ -336,23 +502,106 @@ def process_logfile_records(logfile_directory, logfile_name):
     for record_type, count in record_type_counter.items():
         print(f" {record_type}: {count}")
 
-
-def main():
-    ''' Driver for CSV generator
+def process_logfile(logfile_directory, logfile_name):
+    ''' Parse .dsevents filename in the given directory and generate csv file
     '''
 
-    logfile_directory = input("Enter logfile directory (or q to quit):")
-    if logfile_directory != 'q':
-        while True:
-            log_file_name = input("Enter name of .dsevents file ('q' to quit, 'all' for all dsevents files): ")
-            if log_file_name == 'q':
+    # Dictionary used to keep track of number of records of each type
+    record_type_counter = defaultdict(int)
+
+    known_record_types = {
+        "Info Joystick" : "skip",
+        "Info roboRIO" : "skip",
+        "FMS Connected" : "process",
+        "<TagVersion>" : "process",
+        "Game Specific Data" : "process",
+        "Info Rail Faults" : "process",
+        "Code Start Notification" : "process",
+        "Warning" : "process"
+        }
+    
+    logfile_path = os.path.join(logfile_directory, logfile_name)
+    dsEventParser = DSEventParser(logfile_path)
+
+    for rec in dsEventParser.read_records():
+        msg_time_stamp = rec["time"]
+        message = rec["message"]
+        #print(f"Record: {message[0:25]}")
+
+        known_record_type = False
+        for record_type, action in known_record_types.items():
+            if message.startswith(record_type):
+                if action != "skip":
+                    pass
+                known_record_type = True
+                record_type_counter[record_type] += 1
                 break
-            if log_file_name == 'all':
-                for file in os.listdir(logfile_directory):
-                    if file.endswith(".dsevents"):
-                        #print(f"Processing logfile {file}")
-                        process_logfile_messages(logfile_directory, file)
-            else:
-                process_logfile_records(logfile_directory, log_file_name)
+
+        if not known_record_type:
+            record_type_counter["<Unknown>"] += 1
+            print(f"Unknown record:{message}")
+
+        m = re.match(r'FMS Connected:\s+(?P<match>.*),\s+Field Time:\s+(?P<time>[0-9/ :]*)', message)
+        if m:
+            match_name = m.group('match')
+            field_time = datetime.datetime.strptime(m.group('time'), '%y/%m/%d %H:%M:%S')
+            print(f"Match Name = {match_name}; Field Time = {field_time}")
+
+    print("Summary of # record types found:")
+    for record_type, count in record_type_counter.items():
+        print(f" {record_type}: {count}")
+
+    dsEventParser.close()
+
+def generate_csv(options):
+    ''' Driver to read one or more .dsevents logfile and generate one or more csv files
+    '''
+
+    logfile_directory = options["logfile_directory"]
+    which_files = options["which_files"]
+
+    if which_files == "single":
+        filename = options["logfile_name"]
+        process_logfile(logfile_directory, filename)
+
+    elif which_files == "all":
+        for filename in os.listdir(logfile_directory):
+            if filename.endswith(".dsevents"):
+                #print(f"Processing logfile {file}")
+                process_logfile(logfile_directory, filename)
+
+    else:
+        raise Exception(f"Unknown 'which_files' option: {which_files}")
+
+def main():
+    ''' Get options and start the ball rolling
+    '''
+
+    options = {"logfile_directory" : "",
+               "which_files" : "",          # "single", "all", "competition_only"
+               "logfile_name" : "",
+               "combine_csv" : False,
+              }
+
+    # TODO Get options from command line rather than prompting
+    command_line_args = True
+    if command_line_args:
+        process_logfile("C:\\Temp", "2023_03_11 17_30_45 Sat.dsevents")
+
+    else:
+        logfile_directory = input("Enter logfile directory (or q to quit):")
+        if logfile_directory != 'q':
+            options["logfile_directory"] = logfile_directory
+            while True:
+                logfile_name = input("Enter name of .dsevents file ('q' to quit, 'all' for all dsevents files): ")
+                if logfile_name == 'q':
+                    break
+                if logfile_name == 'all':
+                    options["which_files"] = "all"
+
+                else:
+                    options["which_files"] = "single"
+                    options["logfile_name"] = logfile_name
+                    process_logfile_records(logfile_directory, logfile_name)
 
 main()
