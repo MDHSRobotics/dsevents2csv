@@ -371,7 +371,7 @@ class CSVWriter():
             tagversionElement_start = tagversion_record.find(TAGVERSION_ELEMENT_STR, elementAfterTime_start)
 
 
-    def process_logfile(self, logfile_directory, logfile_path):
+    def process_logfile(self, logfile_directory, logfile_file):
         ''' Parse .dsevents filename in the given directory and generate csv file
         '''
 
@@ -393,6 +393,7 @@ class CSVWriter():
             "Warning" : "process"
             }
     
+        logfile_path = os.path.join(logfile_directory, logfile_file)
         csv_path = logfile_path + '.csv'
 
         # Create and open CSV file for output
@@ -405,7 +406,7 @@ class CSVWriter():
 
         dsEventParser = DSEventParser(logfile_path)
 
-        print(f"\nRead log file: {logfile_path}")
+        print(f"\nReading log file: {logfile_path}")
 
         try:
             match_name = None
@@ -468,7 +469,7 @@ def generate_csv(options):
     elif which_files in ["all", "competition_only"]:
         for filename in os.listdir(logfile_directory):
             if filename.endswith(".dsevents"):
-                logfile_path = os.path.join(logfile_directory, filename)
+
                 #print(f"Processing logfile {file}")
 
                 if which_files == "competition_only":
